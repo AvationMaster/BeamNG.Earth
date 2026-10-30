@@ -247,6 +247,7 @@ FAST_BASE_V = 70.0              # m/s (157 mph): faster, a block waits at most B
 SMALL_FAST_BASE_V = 35.0        # m/s (78 mph): FAST_BASE_V on a small machine (budget.small: a Steam Deck)
 BASE_FAST_WAIT_S = 0.15         # heights, then goes without it (block_base later): blocks took 0.6-3 s at 600 mph on a
                                 # Steam Deck, mostly the photo (heights 0.1-0.4 s), and the game paused 11 times a minute
+QUICK_SYNC_MAX_V = 100.0        # m/s (224 mph): slower, a block built ahead gets its stand-in photo before it is ready
 QUICK_BASE_PX = 512             # a block's stand-in photo (write_quick_base): the imagery alone, 2 m texels
 BASE_WAIT_S = 0.5               # ... and at any speed this long: a 4-core PC's photos took ~26 s while the car was held at
                                 # the edge of its ground for 10-20 s (GitHub #496), and the wait held a heightmap thread
@@ -2239,7 +2240,15 @@ class Server:
                 except Exception as e:
                     log.info("photo lawns %s: %s", (anchor.id, cx, cy), e)
         elif (anchor.id, cx, cy) in self.base_skipped and self.near_visual == "detail" and self.imagery is not None:
-            self.quick_pool.submit(self._quick_later, anchor, cx, cy)  # (its own photo: base_refresh)
+            # a block built ahead (a fast player's prefetch, not waited on yet) gets its stand-in before it is ready:
+            # made after it, the mod could take the block first and show the level's green base until it came (a
+            # player at 170 mph: road, brown, green, road again; 2026-10-30). Its own photo: base_refresh. Faster than
+            # QUICK_SYNC_MAX_V: after it (on its own thread): made before it, the prefetch fell behind at 500 mph (the car
+            # held 40 s of 90 against none); at 170 mph no hold, roads 1.2 km ahead.
+            if getattr(self, "speed", 0.0) < QUICK_SYNC_MAX_V:
+                info["base"] = self.write_quick_base(anchor, cx, cy)
+            else:
+                self.quick_pool.submit(self._quick_later, anchor, cx, cy)
         info["seconds"] = time.perf_counter() - t0
         info["zoom"] = anchor.hm_zoom
         return info
@@ -4675,6 +4684,7 @@ class Connection:
             return
         self.vel = (vx, vy)
         now = time.monotonic()
+        self.s.speed = math.hypot(vx, vy)
         if math.hypot(vx, vy) > FAST_BASE_V:
             self.s.fast_at = now
         self.s.fast = now - getattr(self.s, "fast_at", -1e9) < FAST_KEEP_S
