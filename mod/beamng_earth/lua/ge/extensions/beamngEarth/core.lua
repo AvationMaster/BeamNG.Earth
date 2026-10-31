@@ -937,6 +937,9 @@ local function onMessage(msg)
     cacheInfo = nil
     local settings = rawget(_G, 'beamngEarth_settings')
     if settings and settings.cacheCapGb then net.send({ type = 'cache', capGb = settings.cacheCapGb() }) end
+    -- the world build's CPU budget (settings serverCores): the server's split again at every hello, so the app's
+    -- choice survives its own restarts (cpupin.CORE_LEVELS)
+    if settings and settings.serverCores then net.send({ type = 'cores', level = settings.serverCores() }) end
     -- gas stations on, after every hello (a server started without them too; this comes before any tile request)
     net.send({ type = 'gas_stations', on = true })
     -- the highway signs' switch (settings highwaySigns): no sign tiles built while it is off
@@ -2557,6 +2560,14 @@ function M.cacheClear()
   -- a server without a cache sends no 'cache' after hello and would never answer the clear
   if not cacheInfo then return false, 'the server has no download cache' end
   net.send({ type = 'cache', clear = true })
+  return true
+end
+-- The settings page's "World build cores" (settings.serverCores: 'max', 'balanced' or 'min'): the world server's CPU
+-- split again at once (the 'cores' message; the server pins the game as well). A new server gets it with each hello, so
+-- nothing here when there is no session. Whether it went out.
+function M.serverCoresSet(level)
+  if not cacheReady() then return false end
+  net.send({ type = 'cores', level = tostring(level or 'max') })
   return true
 end
 function M.cacheQuery()

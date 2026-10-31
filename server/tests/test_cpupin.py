@@ -80,6 +80,19 @@ class HybridSplitTest(unittest.TestCase):
         os.environ["BNGE_SERVER_P_CORES"] = "x"
         self.assertEqual(cpupin.split()[0], set(range(12, 24)))
 
+    def test_settings_levels(self):
+        # the settings page's three levels (CORE_LEVELS, the server's 'cores' message): fewer P-cores each step
+        want = {"max": set(range(12, 24)), "balanced": set(range(14, 24)), "min": set(range(16, 24))}
+        for level, server in want.items():
+            self.assertEqual(cpupin.split(*cpupin.CORE_LEVELS[level])[0], server, level)
+            self.assertTrue(cpupin.split(*cpupin.CORE_LEVELS[level])[1] >= {0, 1, 2, 3, 4, 5, 6, 7}, level)
+        self.assertEqual(cpupin.CORE_LEVELS["max"], (cpupin.SERVER_SHARE, cpupin.HYBRID_P_CORES))
+
+    def test_explicit_p_cores_beats_the_env(self):
+        os.environ["BNGE_SERVER_P_CORES"] = "3"          # (the settings page's level wins over the start's env var)
+        self.assertEqual(cpupin.split(cpupin.SERVER_SHARE, 0)[0], set(range(16, 24)))
+        self.assertEqual(cpupin.split(cpupin.SERVER_SHARE, 1)[0], set(range(14, 24)))
+
     def test_game_keeps_four_p_cores(self):
         # 6 P + 8 E (an i5-13500): 2 P-cores to the server, the other 4 to the game
         cores = [((0, i), [2 * i, 2 * i + 1]) for i in range(6)] + [((0, 6 + i), [12 + i]) for i in range(8)]
@@ -88,6 +101,12 @@ class HybridSplitTest(unittest.TestCase):
         server, game = cpupin.split()
         self.assertEqual(server, {8, 9, 10, 11} | set(range(12, 20)))
         self.assertEqual(game, set(range(8)))
+
+    def test_one_kind_levels(self):
+        cpupin.kinds = lambda cores: None        # a CPU of one kind: the share of the 16 cores, then one core
+        self.assertEqual(len(cpupin.split(*cpupin.CORE_LEVELS["max"])[0]), 4)
+        self.assertEqual(len(cpupin.split(*cpupin.CORE_LEVELS["balanced"])[0]), 2)
+        self.assertEqual(cpupin.split(*cpupin.CORE_LEVELS["min"])[0], {23})     # (this CPU's last core is an E-core)
 
     def test_one_kind_is_the_last_quarter(self):
         cpupin.kinds = lambda cores: None        # a CPU of one kind: as before, the last quarter of the 16 cores

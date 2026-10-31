@@ -13,7 +13,8 @@ A hybrid CPU (Alder Lake and later: P-cores and E-cores) is split by kind instea
 of the physical cores there are E-cores, so the whole world build ran on the slowest cores while the game had every
 faster one it did not need (a 13700K, 8 P + 8 E: 4 E-cores for the server's three tile threads, three far-tile and
 four road-tile processes; 8 P-cores and 4 E-cores for the game). There the server gets all the E-cores and the last
-HYBRID_P_CORES P-cores, the game the rest of the P-cores (BNGE_SERVER_P_CORES=<n> sets how many).
+HYBRID_P_CORES P-cores, the game the rest of the P-cores (BNGE_SERVER_P_CORES=<n> sets how many at start; the mod's
+settings page sets CORE_LEVELS live, the server's 'cores' message).
 
     server_cpus, game_cpus = split()              # the CPU sets, or (None, None) when it cannot be done
     pin_self(server_cpus)                          # the server (its threads and worker processes inherit it)
@@ -32,6 +33,14 @@ HYBRID_P_CORES = 2          # P-cores the server takes as well (all the E-cores 
 HYBRID_P_MIN = 6            # ... from this many P-cores per CPU: fewer, the last-quarter rule leaves the game enough
 HYBRID_P_SHARE = 0.5        # ... at most this share of the P-cores
 GAME_P_KEEP = 4             # P-cores the game always keeps (its physics and render threads; 4 measured as the floor)
+# The settings page's "World build cores" (core.serverCoresSet, the mod's 'cores' message): (share of the physical
+# cores, P-cores on a hybrid CPU) for split below. The player trades the world's build speed for the game's frame rate
+# (2026-10-31: "it builds the world actually quicker than i need it to ... free up some cores for the game").
+CORE_LEVELS = {
+    "max": (SERVER_SHARE, HYBRID_P_CORES),      # the split the server starts with
+    "balanced": (SERVER_SHARE / 2, 1),
+    "min": (0.0, 0),                            # the E-cores alone (a CPU of one kind: one core)
+}
 
 
 def _siblings(usable=None):
@@ -52,16 +61,24 @@ def _siblings(usable=None):
     return sorted(groups.items())
 
 
-def split(share=SERVER_SHARE):
+def machine_cores():
+    """[(core key, [cpu ids])] of this process's usable CPUs, the way split() sees them. Call it before pin_self: once
+    the server is pinned it sees only its own CPUs, and a split again from those (the mod's 'cores' message) would be
+    a split of the server's share alone."""
+    return _siblings()
+
+
+def split(share=SERVER_SHARE, p_cores=None, cores=None):
     """(server CPU set, game CPU set): the last cores (with their hyperthread siblings) for the server; on a hybrid
-    CPU the E-cores and the last HYBRID_P_CORES P-cores (see _hybrid)."""
-    cores = _siblings()
+    CPU the E-cores and the last `p_cores` P-cores (HYBRID_P_CORES by default, see _hybrid). `cores`: the CPU's
+    physical cores (machine_cores, kept from the start) instead of this process's usable ones."""
+    cores = _siblings() if cores is None else cores
     if len(cores) < 4:
         return None, None              # too few cores to split usefully
     kind = kinds(cores)
     p = [i for i, k in enumerate(kind or ()) if k == "p"]
     if p and len(p) >= HYBRID_P_MIN:
-        return _hybrid(cores, kind)
+        return _hybrid(cores, kind, p_cores)
     k = max(1, min(len(cores) // 2, int(round(len(cores) * share))))
     try:                                # (the player's choice: BNGE_SERVER_CORES=<n>, still at most half)
         want = int(os.environ.get("BNGE_SERVER_CORES", "") or 0)
@@ -74,17 +91,19 @@ def split(share=SERVER_SHARE):
     return server, game
 
 
-def _hybrid(cores, kind):
+def _hybrid(cores, kind, p_cores=None):
     """(server, game) on a hybrid CPU: all the E-cores and the last `want` P-cores for the server, the other P-cores
-    for the game. BNGE_SERVER_P_CORES=<n> sets the P-cores (0: the E-cores alone); the game keeps GAME_P_KEEP of them
-    whatever the setting, so a fast core always runs its physics."""
+    for the game. `p_cores` (the settings page's "World build cores") or BNGE_SERVER_P_CORES=<n> sets the P-cores (0:
+    the E-cores alone); the game keeps GAME_P_KEEP of them whatever the setting, so a fast core runs its physics."""
     p = [i for i, k in enumerate(kind) if k == "p"]
     e = [i for i, k in enumerate(kind) if k == "e"]
     want = HYBRID_P_CORES
-    try:                                # (the player's choice, like BNGE_SERVER_CORES for a CPU of one kind)
-        if os.environ.get("BNGE_SERVER_P_CORES", ""):
+    try:
+        if p_cores is None and os.environ.get("BNGE_SERVER_P_CORES", ""):    # (the env var, for a manual start)
             want = int(os.environ["BNGE_SERVER_P_CORES"])
-    except ValueError:
+        elif p_cores is not None:
+            want = int(p_cores)
+    except (TypeError, ValueError):
         pass
     take = max(0, min(want, int(len(p) * HYBRID_P_SHARE), len(p) - GAME_P_KEEP))
     server_i = set(e) | set(p[len(p) - take:])

@@ -4224,6 +4224,8 @@ class Connection:
             self.signs_on = bool(msg.get("on", True))
         elif kind == "graphics":                # the settings page's graphics knobs (set_graphics)
             self.set_graphics(msg)
+        elif kind == "cores":                   # the settings page's "World build cores" (set_cores)
+            self.spawn(self.set_cores(msg.get("level")))
         elif kind == "gas_stations":            # the settings page's switch: the road tiles again, with or without
             if self.s.set_gas_stations(msg.get("on")):
                 self.roads.close()
@@ -4277,6 +4279,42 @@ class Connection:
                  "to the horizon" if self.view_cap is None else f"{self.view_cap / 1000:.0f} km")
         if far and self.active is not None:
             self.update_far()
+
+    async def set_cores(self, level):
+        """The settings page's "World build cores" (message 'cores' {level: max | balanced | min}, cpupin.CORE_LEVELS):
+        the server's and the game's CPU sets again at once, from the level's share of the cores (on a hybrid CPU the
+        P-cores too: 'max' all the E-cores and 2 P-cores, 'balanced' one P-core, 'min' none; the game takes the rest,
+        and always keeps cpupin.GAME_P_KEEP of them). The processes' and the game's affinity masks change at once, so
+        the world builds slower and the game has the fast cores from the next frame (2026-10-31: "it builds the world
+        actually quicker than i need it to ... free up some cores for the game to use to better my framerate").
+        Nothing to change with --pin off or a CPU with too few cores (the server said so at start)."""
+        level = level if isinstance(level, str) else "max"
+        if not getattr(self.s, "server_cpus", None) or not getattr(self.s, "game_cpus", None):
+            log.info("cores: %r: no split to change (--pin off, or too few cores)", level)
+            return
+        share, p = cpupin.CORE_LEVELS.get(level, cpupin.CORE_LEVELS["max"])
+        server, game = cpupin.split(share, p, cores=getattr(self.s, "all_cores", None))
+        if not server or not game:
+            return
+        if server == self.s.server_cpus and game == self.s.game_cpus:     # (the usual case: the split it starts with)
+            log.debug("cores %s: the split already", level)
+            return
+        self.s.server_cpus, self.s.game_cpus = server, game
+        if getattr(self.s, "boost_cpus", None) is not None:     # (--load-boost on: the lent cores follow the split)
+            self.s.boost_cpus = cpupin.boosted(server, game)
+        cpus = self.s.boost_cpus if self.s.boost_on and self.s.boost_cpus else server
+
+        def pin():      # (off the event loop: listing every process for the game takes ~2 s on Windows)
+            cpupin.pin_tree(cpus)
+            return cpupin.pin_game(game)
+        try:
+            n = await asyncio.get_running_loop().run_in_executor(None, pin)
+        except OSError as e:
+            log.warning("cores: %s", e)
+            return
+        log.info("cores %s: the server on CPUs %s, the game's %d %s on CPUs %s", level,
+                 ",".join(map(str, sorted(server))), n, "processes" if sys.platform == "win32" else "threads",
+                 ",".join(map(str, sorted(game))))
 
     def kfun(self):
         """K(L) of this connection's far field: the server's times the mod's terrain detail (lodScale)."""
@@ -5670,6 +5708,7 @@ async def main_async(args):
 
     server.game_cpus = getattr(args, "game_cpus", None)    # (cpupin.py: the game pinned at each hello)
     server.server_cpus = getattr(args, "server_cpus", None)
+    server.all_cores = getattr(args, "cores_all", None)     # (the machine's cores: set_cores splits them again)
     server.boost_cpus = (cpupin.boosted(server.server_cpus, server.game_cpus)
                          if getattr(args, "load_boost", "on") == "on" else None)
 
@@ -6210,8 +6249,13 @@ def main():
                  budget.total_gb() or 0)
     if args.pin == "on" and (sys.platform.startswith("linux") or sys.platform == "win32"):   # (Windows: KyzoFox, PR #112)
         try:
-            server_cpus, game_cpus = cpupin.split(budget.SMALL_SERVER_SHARE if small else cpupin.SERVER_SHARE)
+            # (the CPU's cores as they are now: once pinned the server sees only its own share, and the mod's 'cores'
+            # message splits the machine again, not the server's part of it)
+            cores_all = cpupin.machine_cores()
+            server_cpus, game_cpus = cpupin.split(budget.SMALL_SERVER_SHARE if small else cpupin.SERVER_SHARE,
+                                                  cores=cores_all)
             cpupin.pin_self(server_cpus)
+            args.cores_all = cores_all
             if server_cpus:
                 log.info("cores: the server on CPUs %s, the game on %s (cpupin.py; --pin off)",
                          ",".join(map(str, sorted(server_cpus))), ",".join(map(str, sorted(game_cpus))))

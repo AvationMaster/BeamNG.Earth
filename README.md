@@ -170,6 +170,11 @@ You can help support development by reporting [issues](https://github.com/TecnaG
   - **Even frame pacing** (on): keeps the time between frames steady so the game's speed doesn't pulse while the
     world loads around you; costs about a seventh of the frame rate while the world loads (a city drive: 81
     fps against 94), and stays off below 30 fps.
+  - **World build cores**: how much of your CPU the world server may use to build the ground ahead. On a CPU with
+    two kinds of core (12th-generation Intel and later) **Fastest world build** gives it every efficiency core and
+    two fast cores, **Balanced** one fast core, **Most CPU to the game** none of them; on other CPUs the last
+    quarter of the cores, an eighth, or one. The game keeps the rest, so it runs faster while new ground fills in
+    more slowly; applies at once, and every world server you join gets the same choice.
   - **Terrain detail** (Low to Extreme): how far out each finer level of the distant land reaches (Extreme builds
     about twice as many distant ground pieces).
   - **Ground photo** (1024 / 2048 / 4096): the sharpness of the aerial photo and the painted roads on the

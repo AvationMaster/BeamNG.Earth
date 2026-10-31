@@ -147,6 +147,9 @@ MOD_TO_SERVER = {
     # far field's terrain detail (K x lodScale), the tree tiles' and far buildings' reach, the ground photo's px
     "graphics": {"lodScale": F(NUM, OPT), "treeScale": F(NUM, OPT), "buildingScale": F(NUM, OPT),
                  "photoPx": F(NUM, OPT), "viewM": F(NUM, OPT)},
+    # the settings page's "World build cores" (Connection.set_cores; additive): the world build's CPU budget, sent
+    # after every hello and on a change ('max', 'balanced' or 'min': cpupin.CORE_LEVELS)
+    "cores": {"level": F(str, OPT)},
     "map_tiles": {"tiles": F(list)},       # the world map's basemap tiles as files (settings.mapTiles)
     "geocode": {"id": F(int), "q": F(str), "lat": F(NUM, OPT), "lon": F(NUM, OPT)},   # the map's search box
     # the map's cache view (covermap.py; additive): the zoom-z tiles x0..x1, y0..y1; mode summary / elevation /
@@ -548,6 +551,45 @@ class CacheAgreementTest(unittest.TestCase):
         self.assertIsNotNone(row, "the page's cacheCapGb: a number box")
         self.assertEqual(row.group(1), m.group(1))
         self.assertIn("beamngEarth_settings.uiCacheClear()", page)
+
+
+class CoresAgreementTest(unittest.TestCase):
+    """The world build's CPU budget (server/cpupin.py CORE_LEVELS): core.lua sends the page's level on every hello
+    (settings.serverCores) and on each change, earthd.set_cores reads it, and the page, the schema and the server's
+    levels are the same three."""
+
+    def test_cores_in_the_mod(self):
+        core = (LUA / "core.lua").read_text(encoding="utf-8")
+        on_msg = lua_function(core, "onMessage")
+        hello = on_msg[on_msg.index("t == 'hello'"):on_msg.index("t == 'status'")]
+        self.assertIn("net.send({ type = 'cores', level = settings.serverCores() })", hello)
+        self.assertIn("function M.serverCoresSet(level)", core)
+        self.assertIn("net.send({ type = 'cores', level = tostring(level or 'max') })", core)
+        settings = (LUA / "settings.lua").read_text(encoding="utf-8")
+        self.assertRegex(settings, r"serverCores = \{ kind = 'enum', default = 'max', "
+                                   r"values = \{ 'max', 'balanced', 'min' \}")
+        self.assertIn("function M.serverCores() return tostring(values.serverCores or 'max') end", settings)
+        self.assertIn("if core and core.serverCoresSet then core.serverCoresSet(v) end", settings)
+
+    def test_cores_on_both_sides(self):
+        import cpupin
+        earthd = (Path(__file__).resolve().parents[1] / "earthd.py").read_text(encoding="utf-8")
+        self.assertIn('elif kind == "cores":', earthd)
+        self.assertIn('self.set_cores(msg.get("level"))', earthd)
+        self.assertIn("share, p = cpupin.CORE_LEVELS.get(level, cpupin.CORE_LEVELS[\"max\"])", earthd)
+        # (the machine's cores kept from the start: split again from the pinned process's own CPUs would split the
+        # server's share alone)
+        self.assertIn("cpupin.split(share, p, cores=getattr(self.s, \"all_cores\", None))", earthd)
+        self.assertIn("cores_all = cpupin.machine_cores()", earthd)
+        self.assertIn("server.all_cores = getattr(args, \"cores_all\", None)", earthd)
+        # the page: the same three values, its default the schema's
+        page = (LUA.parents[3] / "ui" / "ui-vue" / "mods" / "beamngEarth" / "earthSettingsStore.js").read_text(
+            encoding="utf-8")
+        row = re.search(r'\{ id: "serverCores", type: "select", default: "(\w+)"[^\n]*\n[^\n]*options: \[(.*?)\] \}',
+                        page)
+        self.assertIsNotNone(row, "the page's serverCores: a select")
+        self.assertEqual(row.group(1), "max")
+        self.assertEqual(set(re.findall(r'value: "(\w+)"', row.group(2))), set(cpupin.CORE_LEVELS))
 
 
 class HorizonAgreementTest(unittest.TestCase):

@@ -103,6 +103,10 @@ M.SCHEMA = {
   cacheCapGb = { kind = 'number', default = 20, min = 0, max = 100000, label = 'Download cache size (GB, 0: unlimited)' },
   -- even frame pacing (framepacer.lua): frames shorter than the recent ones wait, so the game's time runs steadily
   framePacing = { kind = 'bool', default = true, label = 'Even frame pacing' },
+  -- the world server's CPU budget (core.serverCoresSet, the server's 'cores' message and cpupin.CORE_LEVELS): on a
+  -- hybrid CPU the E-cores and 2 / 1 / 0 of the P-cores for the server, the rest of the P-cores for the game; on a CPU
+  -- of one kind the last quarter / eighth / one core. Sent on every hello, so the app keeps the player's choice.
+  serverCores = { kind = 'enum', default = 'max', values = { 'max', 'balanced', 'min' }, label = 'World build cores' },
   -- the GPS route's data fetched ahead (the server's route_download; sent with each route): none, the next 12 miles
   -- (20 km), or the whole route (up to 300 miles)
   routeDownload = { kind = 'enum', default = 'ahead', values = { 'off', 'ahead', 'route' },
@@ -115,7 +119,7 @@ M.SCHEMA = {
   updateDismissed = { kind = 'string', default = '', maxLen = 40, label = 'Update notice dismissed (version)' },
   devNoticeSeen = { kind = 'string', default = '', maxLen = 40, label = 'Development build notice seen (version)' },
 }
-M.ORDER = { 'quality', 'framePacing', 'terrainDetail', 'groundPhoto', 'trees', 'treeDistance', 'buildingDistance', 'objectDetail',
+M.ORDER = { 'quality', 'framePacing', 'serverCores', 'terrainDetail', 'groundPhoto', 'trees', 'treeDistance', 'buildingDistance', 'objectDetail',
   'grassDistance', 'nightLights', 'rebaseDistance', 'viewDistanceMode', 'viewDistanceKm', 'hazeStrength', 'skyMode', 'clouds',
   'weatherMode', 'realGravity', 'groundCover', 'groundCoverDensity', 'rocks', 'roads', 'highwaySigns', 'dashboardSatellite',
   'hudVisible', 'statusBar',
@@ -324,6 +328,9 @@ function M.get(key) return values[key] end
 -- The download cache's cap for the server: GB, 0 = unlimited.
 function M.cacheCapGb() return math.max(0, tonumber(values.cacheCapGb) or 0) end
 
+-- The world server's CPU budget: 'max', 'balanced' or 'min' (core.serverCoresSet, the 'cores' message).
+function M.serverCores() return tostring(values.serverCores or 'max') end
+
 -- bytes as the page shows them: "350 MB", "1.2 GB", "20 GB" (decimal units, as the cap)
 local function size(b, whole)
   if b < 0.1e9 then return string.format('%d MB', math.floor(b / 1e6 + 0.5)) end
@@ -408,6 +415,11 @@ local function inOurLevel()
 end
 
 M.APPLY = {
+  -- the world server's CPU split now (core.serverCoresSet); a new server gets it with each hello
+  serverCores = function(v)
+    local core = ext('beamngEarth_core')
+    if core and core.serverCoresSet then core.serverCoresSet(v) end
+  end,
   rebaseDistance = function(v)
     local core = ext('beamngEarth_core')
     if core and core.setRebaseDistance then core.setRebaseDistance(v) else rebase.setDistance(v) end
