@@ -5974,7 +5974,8 @@ def main():
     ap.add_argument("--nice", type=int, default=NICE, help="process niceness increment (0 = leave as is)")
     ap.add_argument("--pin", choices=("on", "off"), default="on",
                     help="Linux and Windows: the server on the last quarter of the physical cores and the game on "
-                         "the rest (cpupin.py; default on; BNGE_SERVER_CORES=<n> for n cores)")
+                         "the rest (cpupin.py; default on; BNGE_SERVER_CORES=<n> for n cores), or on a hybrid CPU the "
+                         "server on the E-cores and 2 P-cores (BNGE_SERVER_P_CORES=<n>)")
     ap.add_argument("--load-boost", choices=("on", "off"), default="on",
                     help="Linux or Windows with --pin on: after a teleport, while the player waits for the world, the server may "
                          "also use half of the game's cores (at idle priority) until the far field is done or the "

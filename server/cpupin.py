@@ -9,6 +9,12 @@ inherit; the cores from GetLogicalProcessorInformation). Before, a Windows serve
 and on a 6-core laptop (i5-11400H) the CPU sat at 100 % with the game at 17-20 fps; the user fell through a bridge
 whose tiles came 19-47 s late. BNGE_SERVER_CORES=<n> sets how many physical cores the server gets.
 
+A hybrid CPU (Alder Lake and later: P-cores and E-cores) is split by kind instead (kinds below): the last quarter
+of the physical cores there are E-cores, so the whole world build ran on the slowest cores while the game had every
+faster one it did not need (a 13700K, 8 P + 8 E: 4 E-cores for the server's three tile threads, three far-tile and
+four road-tile processes; 8 P-cores and 4 E-cores for the game). There the server gets all the E-cores and the last
+HYBRID_P_CORES P-cores, the game the rest of the P-cores (BNGE_SERVER_P_CORES=<n> sets how many).
+
     server_cpus, game_cpus = split()              # the CPU sets, or (None, None) when it cannot be done
     pin_self(server_cpus)                          # the server (its threads and worker processes inherit it)
     pin_game(game_cpus)                            # every thread of the running game
@@ -20,6 +26,12 @@ EXE = "BeamNG.drive.x64"
 WIN = sys.platform == "win32"
 WIN_EXE = EXE.lower() + ".exe"
 SERVER_SHARE = 0.25         # of the physical cores, at least one, never more than half
+# Hybrid CPUs: the E-cores for the server (a tile build is throughput work) and the fastest P-cores for the game (its
+# physics, render and streaming threads must never land on an E-core: Windows' scheduler puts them there under load)
+HYBRID_P_CORES = 2          # P-cores the server takes as well (all the E-cores go with them)
+HYBRID_P_MIN = 6            # ... from this many P-cores per CPU: fewer, the last-quarter rule leaves the game enough
+HYBRID_P_SHARE = 0.5        # ... at most this share of the P-cores
+GAME_P_KEEP = 4             # P-cores the game always keeps (its physics and render threads; 4 measured as the floor)
 
 
 def _siblings(usable=None):
@@ -41,10 +53,15 @@ def _siblings(usable=None):
 
 
 def split(share=SERVER_SHARE):
-    """(server CPU set, game CPU set): the last cores (with their hyperthread siblings) for the server."""
+    """(server CPU set, game CPU set): the last cores (with their hyperthread siblings) for the server; on a hybrid
+    CPU the E-cores and the last HYBRID_P_CORES P-cores (see _hybrid)."""
     cores = _siblings()
     if len(cores) < 4:
         return None, None              # too few cores to split usefully
+    kind = kinds(cores)
+    p = [i for i, k in enumerate(kind or ()) if k == "p"]
+    if p and len(p) >= HYBRID_P_MIN:
+        return _hybrid(cores, kind)
     k = max(1, min(len(cores) // 2, int(round(len(cores) * share))))
     try:                                # (the player's choice: BNGE_SERVER_CORES=<n>, still at most half)
         want = int(os.environ.get("BNGE_SERVER_CORES", "") or 0)
@@ -54,6 +71,25 @@ def split(share=SERVER_SHARE):
         pass
     server = {c for _, cpus in cores[-k:] for c in cpus}
     game = {c for _, cpus in cores[:-k] for c in cpus}
+    return server, game
+
+
+def _hybrid(cores, kind):
+    """(server, game) on a hybrid CPU: all the E-cores and the last `want` P-cores for the server, the other P-cores
+    for the game. BNGE_SERVER_P_CORES=<n> sets the P-cores (0: the E-cores alone); the game keeps GAME_P_KEEP of them
+    whatever the setting, so a fast core always runs its physics."""
+    p = [i for i, k in enumerate(kind) if k == "p"]
+    e = [i for i, k in enumerate(kind) if k == "e"]
+    want = HYBRID_P_CORES
+    try:                                # (the player's choice, like BNGE_SERVER_CORES for a CPU of one kind)
+        if os.environ.get("BNGE_SERVER_P_CORES", ""):
+            want = int(os.environ["BNGE_SERVER_P_CORES"])
+    except ValueError:
+        pass
+    take = max(0, min(want, int(len(p) * HYBRID_P_SHARE), len(p) - GAME_P_KEEP))
+    server_i = set(e) | set(p[len(p) - take:])
+    server = {c for i in server_i for c in cores[i][1]}
+    game = {c for i in range(len(cores)) if i not in server_i for c in cores[i][1]}
     return server, game
 
 
@@ -188,6 +224,8 @@ def _k32():
     import ctypes
     from ctypes import wintypes
     k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.GetLogicalProcessorInformationEx.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    k.GetLogicalProcessorInformationEx.restype = wintypes.BOOL
     k.GetCurrentProcess.restype = wintypes.HANDLE
     k.OpenProcess.restype = wintypes.HANDLE
     k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -246,6 +284,40 @@ def _win_core_masks():
     return [buf[i].ProcessorMask for i in range(n.value // ctypes.sizeof(SLPI)) if buf[i].Relationship == 0]
 
 
+def _win_classes():
+    """{cpu id: efficiency class} from GetLogicalProcessorInformationEx, a hybrid Intel's P-cores 1 and E-cores 0 (a
+    CPU of one kind: every core the same); {} when it cannot be read."""
+    import ctypes
+    from struct import unpack_from
+    try:
+        k = _k32()
+        n = ctypes.c_ulong(0)
+        core = 0                                    # RelationProcessorCore
+        k.GetLogicalProcessorInformationEx(core, None, ctypes.byref(n))
+        if not n.value:
+            return {}
+        buf = ctypes.create_string_buffer(n.value)
+        if not k.GetLogicalProcessorInformationEx(core, buf, ctypes.byref(n)):
+            return {}
+        out, off = {}, 0
+        while off + 8 <= n.value:
+            rel, size = unpack_from("<II", buf.raw, off)
+            if not size:
+                break
+            # SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX: Relationship, Size, then PROCESSOR_RELATIONSHIP's Flags,
+            # EfficiencyClass, Reserved[20], GroupCount, GroupMask[0] (KAFFINITY Mask, WORD Group)
+            if rel == core:
+                eff = buf.raw[off + 9]
+                mask, group = unpack_from("<QH", buf.raw, off + 32)
+                if group == 0:                      # (processor group 0: every mask in this module)
+                    for c in _bits(mask):
+                        out[c] = eff
+            off += size
+        return out
+    except Exception:
+        return {}
+
+
 def _win_cores(usable=None):
     try:
         if usable is None:
@@ -257,6 +329,70 @@ def _win_cores(usable=None):
         return cores_from_masks(_win_core_masks(), usable)
     except Exception:
         return []
+
+
+def _cpu_list(s):
+    """The CPU ids of a kernel cpu list, "0-3,8,12-15": [0, 1, 2, 3, 8, 12, 13, 14, 15]."""
+    out = []
+    for part in s.strip().split(","):
+        part = part.strip()
+        try:
+            if "-" in part:
+                a, b = part.split("-", 1)
+                out += list(range(int(a), int(b) + 1))
+            elif part:
+                out.append(int(part))
+        except ValueError:
+            continue
+    return out
+
+
+def _sysfs_classes():
+    """{cpu id: efficiency class} of a hybrid CPU from the kernel: Intel's hybrid groups (/sys/devices/cpu_core,
+    cpu_atom, intel_pstate), else each CPU's cpu_capacity (ARM big.LITTLE); {} when the machine does not say."""
+    out = {}
+    for path, cls in (("/sys/devices/cpu_core/cpus", 1), ("/sys/devices/cpu_atom/cpus", 0)):
+        try:
+            with open(path) as f:
+                out.update({c: cls for c in _cpu_list(f.read())})
+        except OSError:
+            pass
+    if out:
+        return out
+    try:
+        names = os.listdir("/sys/devices/system/cpu")
+    except OSError:
+        return out
+    for d in names:
+        if d.startswith("cpu") and d[3:].isdigit():
+            try:
+                with open(f"/sys/devices/system/cpu/{d}/cpu_capacity") as f:
+                    out[int(d[3:])] = int(f.read())
+            except (OSError, ValueError):
+                continue
+    return out
+
+
+def kinds_from(cores, classes):
+    """'p' / 'e' per physical core (the order of cores), the highest class the P-cores; None when a core's class is
+    unknown or every core has the same one (not a hybrid: nothing to choose, the last-quarter rule fits)."""
+    if not classes:
+        return None
+    vals = []
+    for _key, cpus in cores:
+        got = {classes[c] for c in cpus if c in classes}
+        if not got:
+            return None
+        vals.append(max(got))
+    if len(set(vals)) < 2:
+        return None
+    top = max(vals)
+    return ["p" if v == top else "e" for v in vals]
+
+
+def kinds(cores):
+    """'p' / 'e' per physical core of a hybrid CPU, else None."""
+    return kinds_from(cores, _win_classes() if WIN else _sysfs_classes())
 
 
 def _win_set(pid, cpus):
